@@ -11,18 +11,21 @@
 - 在生成说明、总结、计划、提交说明时，统一使用中文。
 - 在新增或修改 Markdown 文档时，统一使用中文。
 - 在新增或修改代码注释时，统一使用中文。
-- 在更新了代码之后要告诉我使用什么命令去验证代码更新的正确性
-- 如果更新代码，最好先自己运行测试来判断是否正确
-- 运行命令以前看看有没有开启conda环境"sentiment", conda环境在D盘
-- 写了新的代码例如获取API等，可以写好了代码之后直接自己运行去获取
+- 当更新代码后，请遵循如下步骤：
+  1. 确保已激活 conda 环境 "sentiment"（位于 D 盘）。
+  2. 先自行运行相关测试以验证正确性。
+  3. 告知我用于验证代码更新正确性的命令。
+- 对于新增代码（如获取API等），可在编写完成后直接运行以获取数据。
+- 如果我的表达有误，请严格指出。
 
 ## 项目概览
 
-币安广场内容采集与解析系统。共三条主要流水线：
+币安广场内容采集与解析系统，外加金色财经新闻采集。共四条主要流水线：
 
 1. **用户帖子（v2/增量）** — `crawler_v2.py` → `fetch_pages_from_db.py` → `parse_binance_square_html_final.py`
 2. **Profile 新闻（Binance News 官方）** — `crawler_profile.py`（采集 + 多线程下载 HTML）→ `parse_article.py`
 3. **币种相关新闻** — `crawler_coin.py`（BAPI）→ `fetch_coin_pages.py` → `parse_article.py`
+4. **金色财经新闻** — `sniff_jinse_api.py`（可选）→ `crawl_jinse.py` → `process_jinse.py`
 
 ### 解析器选择（重要）
 
@@ -76,6 +79,23 @@ python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-ht
 python crawler_profile.py --target-posts 300 --fetch-html --workers 4 --html-limit 100 --headless
 ```
 
+### 金色财经新闻流水线
+```bash
+# 步骤 1（可选）：嗅探金色财经 API 接口
+python sniff_jinse_api.py
+
+# 步骤 2：调用 API 采集新闻列表 → CSV
+#   编辑 crawl_jinse.py 顶部变量：
+#     SOURCE = "lives"   # 快讯（内容在 JSON 中）
+#     SOURCE = "articles"  # 产业文章（需下载详情页）
+python crawl_jinse.py
+
+# 步骤 3：下载 HTML + 提取正文/评论 → JSONL
+python process_jinse.py
+```
+
+> 金色财经脚本无命令行参数，所有配置通过编辑 `.py` 文件顶部变量完成。
+
 ### 数据清洗
 ```bash
 python clean_labeled_data.py --input <path> --drop-no-products --drop-label-error --min-comment-total 1
@@ -113,6 +133,9 @@ crawler_v2.py → square_posts_v2.db（SQLite，去重帖子索引）
 | `crawler_util.py` | 共享工具函数：`clean_text()`、`is_meaningful_comment()`、`extract_first_string()`、`ensure_dir()` |
 | `crawler_comment.py` | 评论数据提取辅助函数（递归键遍历、`looks_like_comment_node()`） |
 | `clean_labeled_data.py` | 后处理过滤器（删除无产品、标签错误、评论数低的帖子） |
+| `sniff_jinse_api.py` | 金色财经 API 嗅探器 — Playwright 打开 jinse2.com 拦截所有 JSON API 响应 |
+| `crawl_jinse.py` | 金色财经新闻列表采集器 — 调用 API 分页获取快讯/产业新闻 → CSV |
+| `process_jinse.py` | 金色财经页面处理器 — 读取 CSV URL → Playwright 下载 HTML → 提取 Nuxt.js 正文/评论 → JSONL |
 
 ### 输出目录布局
 - `update_news_v2/` — crawler_v2 输出（数据库、CSV、JSON、last_run.json）
@@ -121,6 +144,11 @@ crawler_v2.py → square_posts_v2.db（SQLite，去重帖子索引）
 - `crawler_coin_output/` — 币种采集器输出（数据库、CSV、JSON）
 - `crawler_profile_output/` — profile 采集器输出（数据库、CSV、JSON、下载的 HTML、解析后的 JSON）
 - `tmp_chrome_profile/` — 持久化 Chromium 用户配置（用于登录态复用）
+- `dataset/csv/jinse_news.csv` — 金色财经新闻列表（crawl_jinse.py 输出）
+- `dataset/html/jinse/` — 金色财经下载的 HTML 页面 + 评论 sidecar JSON
+- `dataset/result/jinse_parsed.jsonl` — 金色财经最终解析结果（process_jinse.py 输出）
+- `dataset/jinse_api_sniff.json` — 金色财经 API 嗅探结果
+- `tmp_chrome_profile_jinse/` — 金色财经专用浏览器缓存（独立于币安）
 
 ### 关键设计决策
 - **增量 + 去重**: URL 存储在 SQLite 中，带 `first_seen_at`/`last_seen_at`/`seen_count` 字段；重复运行只添加新帖子
@@ -131,5 +159,7 @@ crawler_v2.py → square_posts_v2.db（SQLite，去重帖子索引）
 
 
 
-### todo
-1、根据币安广场爬取代码设计金色财经的爬取
+## 当前任务（只使用币安广场爬下来的jsonl文件）
+1、对于每一个评论的用户都需要设计一个与这个用户性格相符的agent，然后根据这个用户与其他用户的对话、上下文去分析这个用户是看涨还是看跌；
+2、接着我们需要根据agent的辩论图去输入图神经网络中进行分析，最终输出一个整个交流网络的情绪的分析，然后根据之后一段时间币价的涨跌来判断我们的分析是否正确
+3、由于目前收集到的新闻有一些还存在label错误，因此需要写一个程序对没有打标签的数据进行修复

@@ -23,6 +23,7 @@
 | 用户帖子 | Square 首页（无限滚动） | `crawler_v2.py` | `fetch_pages_from_db.py` | `parse_binance_square_html_final.py` |
 | Profile 新闻 | Binance News 官方 Profile 页 | `crawler_profile.py`（内置） | `crawler_profile.py`（内置多线程） | `parse_article.py` |
 | 币种新闻 | BAPI 接口 | `crawler_coin.py` | `fetch_coin_pages.py` | `parse_article.py` |
+| 金色财经新闻 | 金色财经 API + 页面 | `crawl_jinse.py` | `process_jinse.py`（内置） | `process_jinse.py`（内置 Nuxt.js 提取） |
 
 ---
 
@@ -268,6 +269,75 @@ python fetch_coin_pages.py --db-path crawler_coin_output/coin_posts.db --output-
 
 ---
 
+## 流水线 4：金色财经新闻
+
+从金色财经（jinse2.com）采集快讯和产业新闻。通过直接调用其公开 API 获取新闻列表，无需浏览器即可完成第一步采集；详情页使用 Playwright 下载并提取 Nuxt.js 服务端渲染的正文内容。
+
+### 命令
+
+```bash
+# 步骤 1（可选）：嗅探金色财经 API 接口，用于了解其 API 结构
+python sniff_jinse_api.py
+
+# 步骤 2：调用 API 采集新闻列表 → CSV
+#   编辑 crawl_jinse.py 顶部变量：
+#     SOURCE = "lives"      → 快讯（内容在 JSON 中，无需下载详情页）
+#     SOURCE = "articles"   → 产业文章（只有标题+摘要+链接，需步骤 3 获取全文）
+python crawl_jinse.py
+
+# 步骤 3：下载 HTML + 提取正文/评论 → JSONL
+#   编辑 process_jinse.py 顶部变量：
+#     LIMIT = 0             → 处理全部，设为 N 则只处理前 N 条
+#     HEADLESS = True       → 无头模式
+python process_jinse.py
+```
+
+> **注意**：金色财经脚本无命令行参数，所有配置通过编辑 `.py` 文件顶部变量完成。
+
+### crawl_jinse.py 配置说明
+
+编辑文件顶部的 `# 配置` 区域：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SOURCE` | `"lives"` | 数据源：`"lives"`=快讯（内容内嵌在 JSON），`"articles"`=产业文章（需下载详情页） |
+| `LIVES_API` | `https://api.jinse2.com/noah/v2/lives` | 快讯 API 地址 |
+| `ARTICLES_API` | `https://api.jinse2.com/noah/v2/catalogue/timelines` | 产业文章 API 地址 |
+| `OUTPUT_CSV` | `dataset/csv/jinse_news.csv` | 输出 CSV 路径 |
+| `PAGE_SIZE` | 20 | 每页条数 |
+| `MAX_PAGES` | 500 | 最大翻页数 |
+| `PAUSE_SECONDS` | 1.0 | 请求间隔秒数 |
+
+输出 CSV 字段：`新闻id`、`时间`、`内容`、`链接`
+
+### process_jinse.py 配置说明
+
+编辑文件顶部的 `# 配置` 区域：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `CSV_PATH` | `dataset/csv/jinse_news.csv` | 输入 CSV 路径 |
+| `HTML_DIR` | `dataset/html/jinse` | HTML 下载目录 |
+| `OUTPUT_JSONL` | `dataset/result/jinse_parsed.jsonl` | 最终输出 JSONL 路径 |
+| `CONTENT_SELECTORS` | `["div.article-content", ...]` | 正文 CSS 选择器（按优先级尝试） |
+| `HEADLESS` | `True` | 无头模式 |
+| `USER_DATA_DIR` | `tmp_chrome_profile_jinse` | 独立浏览器缓存目录 |
+| `TIMEOUT_SECONDS` | 30 | 页面加载超时秒数 |
+| `LIMIT` | 0 | 最多处理条数，0=全部 |
+
+输出 JSONL 字段：`news_id`、`url`、`title`、`time`、`content`、`author`、`comment_num`、`comments`
+
+### 流水线架构
+
+```
+Step 1 (可选): sniff_jinse_api.py  →  dataset/jinse_api_sniff.json
+Step 2:        crawl_jinse.py      →  dataset/csv/jinse_news.csv
+Step 3:        process_jinse.py    →  dataset/html/jinse/*.html + *_comments.json
+                                   →  dataset/result/jinse_parsed.jsonl
+```
+
+---
+
 ## 解析器选择
 
 **重要：不同的内容类型必须使用不同的解析器！**
@@ -323,7 +393,17 @@ sentiment/
 │   ├── *.csv / *.json
 │   └── html_pages/
 │
-└── tmp_chrome_profile/                      # Chromium 持久化用户目录（登录态复用）
+├── dataset/
+│   ├── csv/
+│   │   └── jinse_news.csv                  # 金色财经新闻列表
+│   ├── html/
+│   │   └── jinse/                          # 金色财经下载的 HTML + 评论 sidecar
+│   ├── result/
+│   │   └── jinse_parsed.jsonl             # 金色财经最终解析结果
+│   └── jinse_api_sniff.json                # 金色财经 API 嗅探结果
+│
+├── tmp_chrome_profile/                      # Chromium 持久化用户目录（登录态复用）
+└── tmp_chrome_profile_jinse/                # 金色财经专用浏览器缓存（独立于币安）
 ```
 
 ---
@@ -344,4 +424,4 @@ playwright install chromium
 
 
 ## todo
-1、拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了
+1、~~拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了~~ ✅ 已完成（见流水线 4）
