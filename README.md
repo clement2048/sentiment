@@ -82,9 +82,11 @@ sentiment/
 
 | 流水线 | 数据源 | 采集脚本 | 下载脚本 | 解析脚本 |
 |---|---|---|---|---|
-| 用户帖子 | Square 首页（无限滚动） | `crawler_v2.py` | `fetch_pages_from_db.py` | `parse_binance_square_html_final.py` |
-| Profile 新闻 | Binance News 官方 Profile 页 | `crawler_profile.py`（内置） | `crawler_profile.py`（内置多线程） | `parse_article.py` |
-| 币种新闻 | BAPI 接口 | `crawler_coin.py` | `fetch_coin_pages.py` | `parse_article.py` |
+| 用户帖子 | Square 首页（无限滚动） | `data_collection/crawlers/crawler_v2.py` | `data_collection/downloaders/fetch_pages_from_db.py` | `data_collection/parsers/parse_binance_square_html_final.py` |
+| Profile 新闻 | Binance News 官方 Profile 页 | `data_collection/crawlers/crawler_profile.py`（内置） | `data_collection/crawlers/crawler_profile.py`（内置多线程） | `data_collection/parsers/parse_article.py` |
+| 币种新闻 | BAPI 接口 | `data_collection/crawlers/crawler_coin.py` | `data_collection/downloaders/fetch_coin_pages.py` | `data_collection/parsers/parse_article.py` |
+| 金色财经新闻 | 金色财经 API + 页面 | `data_collection/jinse/crawl_jinse.py` | `data_collection/jinse/process_jinse.py`（内置） | `data_collection/jinse/process_jinse.py`（内置 Nuxt.js 提取） |
+| 情绪分析 | Square 解析结果 JSONL | `agent/`（多 Agent 辩论） | `data_loader/` → `features/` | `gnn/`（GNN 分类器） |
 
 ---
 
@@ -330,6 +332,75 @@ python data_collection/downloaders/fetch_coin_pages.py --db-path crawler_coin_ou
 
 ---
 
+## 流水线 4：金色财经新闻
+
+从金色财经（jinse2.com）采集快讯和产业新闻。通过直接调用其公开 API 获取新闻列表，无需浏览器即可完成第一步采集；详情页使用 Playwright 下载并提取 Nuxt.js 服务端渲染的正文内容。
+
+### 命令
+
+```bash
+# 步骤 1（可选）：嗅探金色财经 API 接口，用于了解其 API 结构
+python data_collection/jinse/sniff_jinse_api.py
+
+# 步骤 2：调用 API 采集新闻列表 → CSV
+#   编辑 data_collection/jinse/crawl_jinse.py 顶部变量：
+#     SOURCE = "lives"      → 快讯（内容在 JSON 中，无需下载详情页）
+#     SOURCE = "articles"   → 产业文章（只有标题+摘要+链接，需步骤 3 获取全文）
+python data_collection/jinse/crawl_jinse.py
+
+# 步骤 3：下载 HTML + 提取正文/评论 → JSONL
+#   编辑 data_collection/jinse/process_jinse.py 顶部变量：
+#     LIMIT = 0             → 处理全部，设为 N 则只处理前 N 条
+#     HEADLESS = True       → 无头模式
+python data_collection/jinse/process_jinse.py
+```
+
+> **注意**：金色财经脚本无命令行参数，所有配置通过编辑 `.py` 文件顶部变量完成。
+
+### crawl_jinse.py 配置说明
+
+编辑文件顶部的 `# 配置` 区域：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SOURCE` | `"lives"` | 数据源：`"lives"`=快讯（内容内嵌在 JSON），`"articles"`=产业文章（需下载详情页） |
+| `LIVES_API` | `https://api.jinse2.com/noah/v2/lives` | 快讯 API 地址 |
+| `ARTICLES_API` | `https://api.jinse2.com/noah/v2/catalogue/timelines` | 产业文章 API 地址 |
+| `OUTPUT_CSV` | `dataset/csv/jinse_news.csv` | 输出 CSV 路径 |
+| `PAGE_SIZE` | 20 | 每页条数 |
+| `MAX_PAGES` | 500 | 最大翻页数 |
+| `PAUSE_SECONDS` | 1.0 | 请求间隔秒数 |
+
+输出 CSV 字段：`新闻id`、`时间`、`内容`、`链接`
+
+### process_jinse.py 配置说明
+
+编辑文件顶部的 `# 配置` 区域：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `CSV_PATH` | `dataset/csv/jinse_news.csv` | 输入 CSV 路径 |
+| `HTML_DIR` | `dataset/html/jinse` | HTML 下载目录 |
+| `OUTPUT_JSONL` | `dataset/result/jinse_parsed.jsonl` | 最终输出 JSONL 路径 |
+| `CONTENT_SELECTORS` | `["div.article-content", ...]` | 正文 CSS 选择器（按优先级尝试） |
+| `HEADLESS` | `True` | 无头模式 |
+| `USER_DATA_DIR` | `data_collection/tmp_chrome_profile_jinse` | 独立浏览器缓存目录 |
+| `TIMEOUT_SECONDS` | 30 | 页面加载超时秒数 |
+| `LIMIT` | 0 | 最多处理条数，0=全部 |
+
+输出 JSONL 字段：`news_id`、`url`、`title`、`time`、`content`、`author`、`comment_num`、`comments`
+
+### 流水线架构
+
+```
+Step 1 (可选): data_collection/jinse/sniff_jinse_api.py  →  dataset/jinse_api_sniff.json
+Step 2:        data_collection/jinse/crawl_jinse.py       →  dataset/csv/jinse_news.csv
+Step 3:        data_collection/jinse/process_jinse.py     →  dataset/html/jinse/*.html + *_comments.json
+                                                          →  dataset/result/jinse_parsed.jsonl
+```
+
+---
+
 ## 解析器选择
 
 **重要：不同的内容类型必须使用不同的解析器！**
@@ -365,7 +436,7 @@ python data_collection/cleaner/clean_labeled_data.py --input <path> --drop-no-pr
 | 模块 | 目录 | 说明 |
 |---|---|---|
 | Agent 系统 | `agent/` | 用户情绪分析 Agent（规则 Agent + LLM Agent + DeepSeek fallback） |
-| 图神经网络 | `gnn/` | 3层 GCN + MeanMax 池化 → MLP 分类器 |
+| 图神经网络 | `gnn/` | 3 层 GCN + MeanMax 池化 → MLP 分类器 |
 | 特征工程 | `features/` | TF-IDF 文本特征 + 加密领域关键词情感词典 |
 | 数据加载 | `data_loader/` | JSONL 加载、jieba 预处理、对话 → PyG 图构建 |
 | 主入口 | `main.py` | 情绪分析入口 (`python main.py --mode train`) |
@@ -419,7 +490,24 @@ sentiment/
 │   ├── *.csv / *.json
 │   └── html_pages/
 │
-└── tmp_chrome_profile/                      # Chromium 持久化用户目录（登录态复用）
+├── dataset/
+│   ├── csv/
+│   │   └── jinse_news.csv                  # 金色财经新闻列表
+│   ├── html/
+│   │   └── jinse/                          # 金色财经下载的 HTML + 评论 sidecar
+│   ├── result/
+│   │   ├── jinse_parsed.jsonl             # 金色财经最终解析结果
+│   │   └── parsed_28.jsonl                # 情绪分析训练数据
+│   └── jinse_api_sniff.json                # 金色财经 API 嗅探结果
+│
+├── output/                                   # 情绪分析输出
+│   ├── models/                              # 训练好的模型
+│   ├── predictions/                         # 预测结果
+│   └── logs/                                # 训练日志
+│
+├── data_collection/
+│   ├── tmp_chrome_profile/                  # Chromium 持久化用户目录（登录态复用）
+│   └── tmp_chrome_profile_jinse/            # 金色财经专用浏览器缓存（独立于币安）
 ```
 
 ---
@@ -440,5 +528,7 @@ playwright install chromium
 
 ---
 
-## todo
-1、拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了
+## TODO
+
+1. ~~拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了~~ ✅ 已完成（见流水线 4）
+2. 对没有打标签的数据编写程序进行标签修复
