@@ -1,4 +1,4 @@
-tmp_chrome_profile/
+data_collection/tmp_chrome_profile/
 update_news/
 __pycache__/
 *.pyc
@@ -23,4 +23,4 @@ crawler_coin_output/
 *.html
 *.log
 *.jsonl
-tmp_chrome_profile_jinse/
+data_collection/tmp_chrome_profile_jinse/

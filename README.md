@@ -1,29 +1,92 @@
-# Binance Square（币安广场）内容采集与解析系统
+# Binance Square（币安广场）内容采集与情绪分析系统
 
-币安广场内容采集与解析系统，包含三条独立流水线，覆盖普通用户帖子、官方新闻文章和币种相关新闻。
+币安广场内容采集与解析系统，包含四条独立流水线（覆盖普通用户帖子、官方新闻文章、币种相关新闻和金色财经新闻），以及基于多 Agent + 图神经网络 (GNN) 的情绪分析系统。
 
 ## 目录
 
-- [三条流水线概览](#三条流水线概览)
+- [项目结构](#项目结构)
+- [四条流水线概览](#四条流水线概览)
 - [输出统计说明](#输出统计说明)
 - [流水线 1：用户帖子](#流水线-1用户帖子v2推荐)
 - [流水线 2：Profile 新闻（官方文章）](#流水线-2profile-新闻binance-news-官方文章)
 - [流水线 3：币种新闻](#流水线-3币种新闻)
+- [流水线 4：金色财经新闻](#流水线-4金色财经新闻)
 - [解析器选择](#解析器选择)
 - [数据清洗](#数据清洗)
+- [情绪分析系统](#情绪分析系统)
 - [输出目录布局](#输出目录布局)
 - [环境配置](#环境配置)
 
 ---
 
-## 三条流水线概览
+## 项目结构
+
+```
+sentiment/
+├── data_collection/                    # 数据采集模块
+│   ├── crawlers/                       # 采集器
+│   │   ├── crawler_v2.py               # 用户帖子采集（Square 首页无限滚动）
+│   │   ├── crawler_profile.py          # Profile 新闻采集 + 多线程下载 + 解析
+│   │   └── crawler_coin.py             # 币种新闻采集（BAPI 接口）
+│   ├── downloaders/                    # HTML 下载器
+│   │   ├── fetch_pages_from_db.py      # 从数据库下载用户帖子 HTML
+│   │   └── fetch_coin_pages.py         # 币种帖子 HTML 下载器
+│   ├── parsers/                        # 解析器
+│   │   ├── parse_article.py            # 官方新闻文章解析（相对时间、过滤相关文章）
+│   │   └── parse_binance_square_html_final.py  # 用户帖子解析（APP_DATA + DOM 回退）
+│   ├── jinse/                          # 金色财经
+│   │   ├── sniff_jinse_api.py          # API 嗅探器
+│   │   ├── crawl_jinse.py              # 新闻列表采集
+│   │   └── process_jinse.py            # 页面下载 + 正文提取
+│   ├── cleaner/                        # 数据清洗
+│   │   └── clean_labeled_data.py       # 后处理过滤器
+│   └── utils/                          # 工具模块
+│       ├── crawler_util.py             # 共享工具函数
+│       └── crawler_comment.py          # 评论数据提取辅助
+│
+├── agent/                              # 用户情绪分析 Agent
+│   ├── user_profile.py                 # 用户画像
+│   ├── rule_agent.py                   # 规则 Agent
+│   ├── llm_agent.py                    # LLM Agent（DeepSeek fallback）
+│   ├── agent_factory.py               # Agent 工厂
+│   └── agent_orchestrator.py          # Agent 编排器
+│
+├── gnn/                                # 图神经网络
+│   ├── model.py                        # 3层 GCN + MeanMax 池化 → MLP 分类器
+│   ├── dataset.py                      # PyG 数据集
+│   ├── trainer.py                      # 训练器
+│   └── predictor.py                    # 预测器
+│
+├── features/                           # 特征工程
+│   ├── keyword_sentiment.py            # TF-IDF 文本特征
+│   ├── text_embedding.py               # 加密领域关键词情感词典
+│   └── feature_pipeline.py            # 特征流水线
+│
+├── data_loader/                        # 数据加载
+│   ├── loader.py                       # JSONL 加载
+│   ├── preprocessor.py                 # jieba 预处理
+│   └── graph_builder.py               # 对话 → PyG 图构建
+│
+├── main.py                             # 情绪分析主入口
+├── config.py                           # 全局配置
+├── logger.py                           # 日志模块
+│
+├── CLAUDE.md                           # 项目指引
+├── environment.yml                     # conda 环境配置
+└── requirements.txt                    # Python 依赖
+```
+
+---
+
+## 四条流水线概览
 
 | 流水线 | 数据源 | 采集脚本 | 下载脚本 | 解析脚本 |
 |---|---|---|---|---|
-| 用户帖子 | Square 首页（无限滚动） | `crawler_v2.py` | `fetch_pages_from_db.py` | `parse_binance_square_html_final.py` |
-| Profile 新闻 | Binance News 官方 Profile 页 | `crawler_profile.py`（内置） | `crawler_profile.py`（内置多线程） | `parse_article.py` |
-| 币种新闻 | BAPI 接口 | `crawler_coin.py` | `fetch_coin_pages.py` | `parse_article.py` |
-| 金色财经新闻 | 金色财经 API + 页面 | `crawl_jinse.py` | `process_jinse.py`（内置） | `process_jinse.py`（内置 Nuxt.js 提取） |
+| 用户帖子 | Square 首页（无限滚动） | `data_collection/crawlers/crawler_v2.py` | `data_collection/downloaders/fetch_pages_from_db.py` | `data_collection/parsers/parse_binance_square_html_final.py` |
+| Profile 新闻 | Binance News 官方 Profile 页 | `data_collection/crawlers/crawler_profile.py`（内置） | `data_collection/crawlers/crawler_profile.py`（内置多线程） | `data_collection/parsers/parse_article.py` |
+| 币种新闻 | BAPI 接口 | `data_collection/crawlers/crawler_coin.py` | `data_collection/downloaders/fetch_coin_pages.py` | `data_collection/parsers/parse_article.py` |
+| 金色财经新闻 | 金色财经 API + 页面 | `data_collection/jinse/crawl_jinse.py` | `data_collection/jinse/process_jinse.py`（内置） | `data_collection/jinse/process_jinse.py`（内置 Nuxt.js 提取） |
+| 情绪分析 | Square 解析结果 JSONL | `agent/`（多 Agent 辩论） | `data_loader/` → `features/` | `gnn/`（GNN 分类器） |
 
 ---
 
@@ -53,16 +116,16 @@
 
 ```bash
 # 步骤 1：增量采集帖子 URL 到 SQLite
-python crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login
+python data_collection/crawlers/crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login
 
 # 步骤 2：从 DB 下载 HTML 页面
-python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --limit 200 --headless
+python data_collection/downloaders/fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --limit 200 --headless
 
 # 步骤 3：解析 HTML 为结构化 JSON
-python parse_binance_square_html_final.py --batch --input update_news/binance_square_page_dump --output update_news/parsed_from_html/binance_square_html_parsed.json
+python data_collection/parsers/parse_binance_square_html_final.py --batch --input update_news/binance_square_page_dump --output update_news/parsed_from_html/binance_square_html_parsed.json
 
 # 一步到位：采集 + 下载 HTML
-python crawler_v2.py --lang en --target-posts 500 --fetch-html --html-limit 200 --headless
+python data_collection/crawlers/crawler_v2.py --lang en --target-posts 500 --fetch-html --html-limit 200 --headless
 ```
 
 ### crawler_v2.py 参数说明
@@ -78,7 +141,7 @@ python crawler_v2.py --lang en --target-posts 500 --fetch-html --html-limit 200 
 | `--max-runtime-minutes` | float | 0 | 最大运行时间（分钟），0=不限 |
 | `--headless` | flag | 关 | 启用无头模式（不显示浏览器窗口） |
 | `--wait-for-login` | flag | 关 | 打开页面后暂停，等待手动登录后按 Enter 继续 |
-| `--user-data-dir` | str | `tmp_chrome_profile` | 持久化 Chromium 用户目录，保留登录态 |
+| `--user-data-dir` | str | `data_collection/tmp_chrome_profile` | 持久化 Chromium 用户目录，保留登录态 |
 | `--output-dir` | str | `update_news_v2` | 输出目录 |
 | `--db-path` | str | 自动 | SQLite 数据库路径，默认 `<output-dir>/square_posts_v2.db` |
 | `--export-limit` | int | 0 | 导出 CSV/JSON 的行数限制，0=全部 |
@@ -101,7 +164,7 @@ python crawler_v2.py --lang en --target-posts 500 --fetch-html --html-limit 200 
 | `--offset` | int | 0 | 从第几条开始（配合 `--limit` 分批下载） |
 | `--pause-seconds` | float | 0.8 | 每次请求之间的暂停秒数 |
 | `--headless` | flag | 关 | 启用无头模式 |
-| `--user-data-dir` | str | `tmp_chrome_profile` | 持久化浏览器用户目录 |
+| `--user-data-dir` | str | `data_collection/tmp_chrome_profile` | 持久化浏览器用户目录 |
 | `--overwrite` | flag | 关 | 覆盖已存在的 HTML 文件 |
 | `--save-screenshot` | flag | 关 | 同时保存 PNG 截图 |
 | `--timeout-seconds` | int | 60 | 页面加载超时秒数 |
@@ -120,28 +183,28 @@ python crawler_v2.py --lang en --target-posts 500 --fetch-html --html-limit 200 
 
 ```bash
 # 检查连通性
-python crawler_profile.py --check-only --headless
+python data_collection/crawlers/crawler_profile.py --check-only --headless
 
 # 采集 + 多线程下载 HTML（4 线程）
-python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --headless
+python data_collection/crawlers/crawler_profile.py --target-posts 500 --fetch-html --workers 4 --headless
 
 # 采集 + 下载 + 过滤（只要至少有 1 条评论或 1 个产品符号的帖子）
-python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --require-content --headless
+python data_collection/crawlers/crawler_profile.py --target-posts 500 --fetch-html --workers 4 --require-content --headless
 
 # 采集 + 下载 + 解析（端到端，一条命令走完）
-python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --headless
+python data_collection/crawlers/crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --headless
 
 # 采集 + 下载 + 解析 + 过滤（端到端，保留评论>=5且有产品的文章）
-python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --filter-parsed --headless --min-comment-total 5 --drop-no-products
+python data_collection/crawlers/crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --filter-parsed --headless --min-comment-total 5 --drop-no-products
 
 # 仅对已有解析结果执行过滤
-python crawler_profile.py --filter-parsed --min-comment-total 5 --drop-no-products
+python data_collection/crawlers/crawler_profile.py --filter-parsed --min-comment-total 5 --drop-no-products
 
 # 只下载不采集（数据库已有 URL，跳过采集阶段）
-python crawler_profile.py --target-posts 300 --fetch-html --workers 4 --html-limit 100 --headless
+python data_collection/crawlers/crawler_profile.py --target-posts 300 --fetch-html --workers 4 --html-limit 100 --headless
 
 # 覆盖已存在的 HTML
-python crawler_profile.py --fetch-html --workers 4 --html-overwrite --headless
+python data_collection/crawlers/crawler_profile.py --fetch-html --workers 4 --html-overwrite --headless
 ```
 
 ### crawler_profile.py 参数说明
@@ -160,7 +223,7 @@ python crawler_profile.py --fetch-html --workers 4 --html-overwrite --headless
 | `--max-runtime-minutes` | float | 0 | 最大运行时间（分钟），0=不限 |
 | `--headless` | flag | 关 | 启用无头模式 |
 | `--wait-for-login` | flag | 关 | 打开页面后暂停，等待手动登录 |
-| `--user-data-dir` | str | `tmp_chrome_profile` | 持久化 Chromium 用户目录 |
+| `--user-data-dir` | str | `data_collection/tmp_chrome_profile` | 持久化 Chromium 用户目录 |
 | `--output-dir` | str | `crawler_profile_output` | 输出目录 |
 | `--db-path` | str | 自动 | SQLite 路径，默认 `<output-dir>/profile_posts.db` |
 | `--export-limit` | int | 0 | 导出 CSV/JSON 行数限制，0=全部 |
@@ -215,10 +278,10 @@ python crawler_profile.py --fetch-html --workers 4 --html-overwrite --headless
 
 ```bash
 # 采集 + 下载 + 解析 + 过滤（保留评论>=5且有产品的文章）
-python crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --filter-parsed --headless --min-comment-total 5 --drop-no-products
+python data_collection/crawlers/crawler_profile.py --target-posts 500 --fetch-html --workers 4 --parse-html --filter-parsed --headless --min-comment-total 5 --drop-no-products
 
 # 仅对已有解析结果执行过滤
-python crawler_profile.py --filter-parsed --min-comment-total 5 --drop-no-products
+python data_collection/crawlers/crawler_profile.py --filter-parsed --min-comment-total 5 --drop-no-products
 ```
 
 ---
@@ -231,16 +294,16 @@ python crawler_profile.py --filter-parsed --min-comment-total 5 --drop-no-produc
 
 ```bash
 # 检查 API 连通性并估算各币种命中率
-python crawler_coin.py --check-only --symbols BTC,ETH,SOL --trust-env-proxy
+python data_collection/crawlers/crawler_coin.py --check-only --symbols BTC,ETH,SOL --trust-env-proxy
 
 # 按币种采集
-python crawler_coin.py --symbols BTC,ETH,SOL --max-posts 200 --trust-env-proxy
+python data_collection/crawlers/crawler_coin.py --symbols BTC,ETH,SOL --max-posts 200 --trust-env-proxy
 
 # 采集 + 自动下载 HTML
-python crawler_coin.py --symbols BTC --max-posts 100 --fetch-html --headless --trust-env-proxy
+python data_collection/crawlers/crawler_coin.py --symbols BTC --max-posts 100 --fetch-html --headless --trust-env-proxy
 
 # 下载指定币种的 HTML
-python fetch_coin_pages.py --db-path crawler_coin_output/coin_posts.db --output-dir crawler_coin_output/html_pages --symbol BTC --limit 100 --headless
+python data_collection/downloaders/fetch_coin_pages.py --db-path crawler_coin_output/coin_posts.db --output-dir crawler_coin_output/html_pages --symbol BTC --limit 100 --headless
 ```
 
 ### crawler_coin.py 参数说明
@@ -264,7 +327,7 @@ python fetch_coin_pages.py --db-path crawler_coin_output/coin_posts.db --output-
 | `--fetch-html` | flag | 关 | 采集后自动调用 HTML 下载阶段 |
 | `--html-limit` | int | 100 | HTML 下载的最大帖子数 |
 | `--headless` | flag | 关 | 下载 HTML 时使用无头模式 |
-| `--user-data-dir` | str | `tmp_chrome_profile` | 浏览器用户数据目录 |
+| `--user-data-dir` | str | `data_collection/tmp_chrome_profile` | 浏览器用户数据目录 |
 | `--trust-env-proxy` | flag | 关 | 使用系统代理（国内用户需开启） |
 
 ---
@@ -277,19 +340,19 @@ python fetch_coin_pages.py --db-path crawler_coin_output/coin_posts.db --output-
 
 ```bash
 # 步骤 1（可选）：嗅探金色财经 API 接口，用于了解其 API 结构
-python sniff_jinse_api.py
+python data_collection/jinse/sniff_jinse_api.py
 
 # 步骤 2：调用 API 采集新闻列表 → CSV
-#   编辑 crawl_jinse.py 顶部变量：
+#   编辑 data_collection/jinse/crawl_jinse.py 顶部变量：
 #     SOURCE = "lives"      → 快讯（内容在 JSON 中，无需下载详情页）
 #     SOURCE = "articles"   → 产业文章（只有标题+摘要+链接，需步骤 3 获取全文）
-python crawl_jinse.py
+python data_collection/jinse/crawl_jinse.py
 
 # 步骤 3：下载 HTML + 提取正文/评论 → JSONL
-#   编辑 process_jinse.py 顶部变量：
+#   编辑 data_collection/jinse/process_jinse.py 顶部变量：
 #     LIMIT = 0             → 处理全部，设为 N 则只处理前 N 条
 #     HEADLESS = True       → 无头模式
-python process_jinse.py
+python data_collection/jinse/process_jinse.py
 ```
 
 > **注意**：金色财经脚本无命令行参数，所有配置通过编辑 `.py` 文件顶部变量完成。
@@ -321,7 +384,7 @@ python process_jinse.py
 | `OUTPUT_JSONL` | `dataset/result/jinse_parsed.jsonl` | 最终输出 JSONL 路径 |
 | `CONTENT_SELECTORS` | `["div.article-content", ...]` | 正文 CSS 选择器（按优先级尝试） |
 | `HEADLESS` | `True` | 无头模式 |
-| `USER_DATA_DIR` | `tmp_chrome_profile_jinse` | 独立浏览器缓存目录 |
+| `USER_DATA_DIR` | `data_collection/tmp_chrome_profile_jinse` | 独立浏览器缓存目录 |
 | `TIMEOUT_SECONDS` | 30 | 页面加载超时秒数 |
 | `LIMIT` | 0 | 最多处理条数，0=全部 |
 
@@ -330,10 +393,10 @@ python process_jinse.py
 ### 流水线架构
 
 ```
-Step 1 (可选): sniff_jinse_api.py  →  dataset/jinse_api_sniff.json
-Step 2:        crawl_jinse.py      →  dataset/csv/jinse_news.csv
-Step 3:        process_jinse.py    →  dataset/html/jinse/*.html + *_comments.json
-                                   →  dataset/result/jinse_parsed.jsonl
+Step 1 (可选): data_collection/jinse/sniff_jinse_api.py  →  dataset/jinse_api_sniff.json
+Step 2:        data_collection/jinse/crawl_jinse.py       →  dataset/csv/jinse_news.csv
+Step 3:        data_collection/jinse/process_jinse.py     →  dataset/html/jinse/*.html + *_comments.json
+                                                          →  dataset/result/jinse_parsed.jsonl
 ```
 
 ---
@@ -344,8 +407,8 @@ Step 3:        process_jinse.py    →  dataset/html/jinse/*.html + *_comments.j
 
 | 解析器 | 适用内容 | 来源 |
 |---|---|---|
-| `parse_binance_square_html_final.py` | **用户帖子（Posts）** | Square 首页 / discover 页采集的普通用户内容 |
-| `parse_article.py` | **官方新闻文章（Articles）** | Binance News 等官方账号发布的新闻，支持相对时间（"1h ago"）、过滤相关文章推荐 |
+| `data_collection/parsers/parse_binance_square_html_final.py` | **用户帖子（Posts）** | Square 首页 / discover 页采集的普通用户内容 |
+| `data_collection/parsers/parse_article.py` | **官方新闻文章（Articles）** | Binance News 等官方账号发布的新闻，支持相对时间（"1h ago"）、过滤相关文章推荐 |
 
 ---
 
@@ -353,7 +416,41 @@ Step 3:        process_jinse.py    →  dataset/html/jinse/*.html + *_comments.j
 
 ```bash
 # 过滤掉无产品符号、标签错误、评论数过低的帖子
-python clean_labeled_data.py --input <path> --drop-no-products --drop-label-error --min-comment-total 1
+python data_collection/cleaner/clean_labeled_data.py --input <path> --drop-no-products --drop-label-error --min-comment-total 1
+```
+
+---
+
+## 情绪分析系统
+
+项目核心：多 Agent + 图神经网络 (GNN) 情绪分析系统，对币安广场评论进行用户级情绪判断和对话级涨跌分类。
+
+### 系统设计
+
+1. 对于每一个评论的用户，设计一个与用户性格相符的 Agent，根据该用户与其他用户的对话上下文，分析该用户是看涨还是看跌。
+2. 根据 Agent 的辩论图，输入图神经网络进行分析，最终输出整个交流网络的情绪分析。
+3. 根据之后一段时间币价的涨跌，判断情绪分析是否正确。
+
+### 架构
+
+| 模块 | 目录 | 说明 |
+|---|---|---|
+| Agent 系统 | `agent/` | 用户情绪分析 Agent（规则 Agent + LLM Agent + DeepSeek fallback） |
+| 图神经网络 | `gnn/` | 3层 GCN + MeanMax 池化 → MLP 分类器 |
+| 特征工程 | `features/` | TF-IDF 文本特征 + 加密领域关键词情感词典 |
+| 数据加载 | `data_loader/` | JSONL 加载、jieba 预处理、对话 → PyG 图构建 |
+| 主入口 | `main.py` | 情绪分析入口 (`python main.py --mode train`) |
+| 全局配置 | `config.py` | 集中式全局配置 |
+| 日志 | `logger.py` | 日志模块 |
+
+### 命令
+
+```bash
+# 训练（规则 Agent）
+python main.py --mode train --input dataset/result/parsed_28.jsonl
+
+# 训练（LLM Agent，需 DEEPSEEK_API_KEY）
+python main.py --mode train --use-llm
 ```
 
 ---
@@ -399,11 +496,18 @@ sentiment/
 │   ├── html/
 │   │   └── jinse/                          # 金色财经下载的 HTML + 评论 sidecar
 │   ├── result/
-│   │   └── jinse_parsed.jsonl             # 金色财经最终解析结果
+│   │   ├── jinse_parsed.jsonl             # 金色财经最终解析结果
+│   │   └── parsed_28.jsonl                # 情绪分析训练数据
 │   └── jinse_api_sniff.json                # 金色财经 API 嗅探结果
 │
-├── tmp_chrome_profile/                      # Chromium 持久化用户目录（登录态复用）
-└── tmp_chrome_profile_jinse/                # 金色财经专用浏览器缓存（独立于币安）
+├── output/                                   # 情绪分析输出
+│   ├── models/                              # 训练好的模型
+│   ├── predictions/                         # 预测结果
+│   └── logs/                                # 训练日志
+│
+├── data_collection/
+│   ├── tmp_chrome_profile/                  # Chromium 持久化用户目录（登录态复用）
+│   └── tmp_chrome_profile_jinse/            # 金色财经专用浏览器缓存（独立于币安）
 ```
 
 ---
@@ -422,6 +526,9 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
+---
 
-## todo
-1、~~拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了~~ ✅ 已完成（见流水线 4）
+## TODO
+
+1. ~~拓展金色财经等平台爬取新闻，因为币安平台的新闻太少了~~ ✅ 已完成（见流水线 4）
+2. 对没有打标签的数据编写程序进行标签修复
