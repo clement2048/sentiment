@@ -2,7 +2,7 @@
 url='https://www.binance.com/zh-CN/square/post/311338831687490'
 with sync_playwright() as p:
     ctx=p.chromium.launch_persistent_context(
-        user_data_dir=r'e:\\code\\sentiment\\data_collection\\tmp_chrome_profile',
+        user_data_dir=r'e:\\code\\sentiment\\tmp_chrome_profile',
         channel='chrome',
         headless=True,
         args=['--profile-directory=Default','--no-proxy-server','--proxy-bypass-list=*'],

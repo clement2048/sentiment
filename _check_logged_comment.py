@@ -1,7 +1,7 @@
 ﻿from playwright.sync_api import sync_playwright
 
 url = 'https://www.binance.com/zh-CN/square/post/311338831687490'
-user_data_dir = r'e:\\code\\sentiment\\data_collection\\tmp_chrome_profile'
+user_data_dir = r'e:\\code\\sentiment\\tmp_chrome_profile'
 
 with sync_playwright() as p:
     context = p.chromium.launch_persistent_context(
