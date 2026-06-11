@@ -48,6 +48,9 @@ from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlsplit, urlunsplit
 
+# 确保项目根目录在 sys.path 中，支持从任意目录运行
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from utils.crawler_util import ensure_dir
 
 try:

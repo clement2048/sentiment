@@ -26,6 +26,9 @@ import sys
 import requests
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PRICE_CACHE_DIR = PROJECT_ROOT / "dataset" / "cache" / "price_klines"
+
 
 # ---------------------------------------------------------------------------
 # 时间处理（Article 特有）
@@ -458,12 +461,57 @@ def extract_comment_timestamp_map_from_app_data(app_data: Dict[str, Any]) -> Dic
     return timestamp_map
 
 
+def _price_cache_path(symbol: str, market_type: str, interval: str) -> Path:
+    """返回某个交易对/市场/K线周期的本地价格缓存文件。"""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{market_type}_{symbol}_{interval}".lower())
+    return PRICE_CACHE_DIR / f"{safe}.json"
+
+
+def _load_price_cache(symbol: str, market_type: str, interval: str) -> Dict[str, Any]:
+    """读取本地价格缓存。"""
+    path = _price_cache_path(symbol, market_type, interval)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_price_cache(symbol: str, market_type: str, interval: str, cache: Dict[str, Any]) -> None:
+    """写入本地价格缓存。"""
+    PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _price_cache_path(symbol, market_type, interval).write_text(
+        json.dumps(cache, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def normalize_label_error(err: str) -> tuple[str, str]:
+    """把长错误归一为短错误码，返回 (短错误码, 原始错误)。"""
+    if not err:
+        return "", ""
+    if err.startswith("price_api_error:"):
+        return "price_api_error", err
+    return err, ""
+
+
 def fetch_price_at(symbol: str, market_type: str, ts_ms: int, interval: str) -> tuple[Optional[float], str]:
     """按时间点获取最邻近K线收盘价。"""
     if not symbol or ts_ms <= 0:
         return None, "invalid_symbol_or_timestamp"
 
     market = (market_type or "spot").lower()
+    cache_key = str(int(ts_ms))
+    cache = _load_price_cache(symbol, market, interval)
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict) and cached.get("price") is not None:
+        try:
+            return float(cached["price"]), ""
+        except Exception:
+            pass
+
     if market == "futures":
         endpoint = "https://fapi.binance.com/fapi/v1/klines"
     else:
@@ -482,6 +530,13 @@ def fetch_price_at(symbol: str, market_type: str, ts_ms: int, interval: str) -> 
 
     try:
         close_price = float(payload[0][4])
+        cache[cache_key] = {
+            "price": close_price,
+            "open_time": payload[0][0] if len(payload[0]) > 0 else ts_ms,
+            "close_time": payload[0][6] if len(payload[0]) > 6 else 0,
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save_price_cache(symbol, market, interval, cache)
         return close_price, ""
     except Exception:
         return None, "invalid_kline_format"
@@ -499,17 +554,53 @@ def annotate_comment_blocks(
     """按讨论块（根评论+回复）打标签。"""
     if not comments:
         return ""
+
+    now_ms = int(datetime.now().timestamp() * 1000)
+    price_cache: Dict[int, tuple[Optional[float], str]] = {}
+
+    def iter_block_nodes(node: Dict[str, Any]):
+        yield node
+        for rep in node.get("replies", []):
+            yield from iter_block_nodes(rep)
+
+    def apply_block_fields(
+        root: Dict[str, Any],
+        *,
+        t0: str,
+        p0: Optional[float],
+        p1: Optional[float],
+        label: Optional[int],
+        comment_error: str = "",
+        label_warning: str = "",
+        debug_error: str = "",
+    ) -> None:
+        for node in iter_block_nodes(root):
+            node["t0"] = t0
+            node["t_window"] = f"{t_window_hours}h"
+            node["p0"] = p0
+            node["p1"] = p1
+            node["label"] = label
+            node["comment_error"] = comment_error
+            if label_warning:
+                node["label_warning"] = label_warning
+            else:
+                node.pop("label_warning", None)
+            if debug_error:
+                node["debug_error"] = debug_error
+            else:
+                node.pop("debug_error", None)
+
     if not symbol:
         for comment in comments:
-            comment["t0"] = ""
-            comment["t_window"] = f"{t_window_hours}h"
-            comment["p0"] = None
-            comment["p1"] = None
-            comment["label"] = None
-            comment["comment_error"] = "missing_symbol"
+            apply_block_fields(
+                comment,
+                t0="",
+                p0=None,
+                p1=None,
+                label=None,
+                comment_error="missing_symbol",
+            )
         return "missing_symbol"
-
-    price_cache: Dict[int, tuple[Optional[float], str]] = {}
 
     def collect_ids(node: Dict[str, Any], bucket: List[str]) -> None:
         cid = str(node.get("original_comment_id") or node.get("comment_id") or "")
@@ -527,16 +618,30 @@ def annotate_comment_blocks(
             if fallback_t0_ms > 0:
                 ts_values = [fallback_t0_ms]
             else:
-                comment["t0"] = ""
-                comment["t_window"] = f"{t_window_hours}h"
-                comment["p0"] = None
-                comment["p1"] = None
-                comment["label"] = None
-                comment["comment_error"] = "missing_comment_timestamp"
+                apply_block_fields(
+                    comment,
+                    t0="",
+                    p0=None,
+                    p1=None,
+                    label=None,
+                    comment_error="missing_comment_timestamp",
+                )
                 continue
 
         t0_ms = max(ts_values)
         t1_ms = t0_ms + int(t_window_hours) * 3600 * 1000
+        t0_readable = datetime.fromtimestamp(t0_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+        if t1_ms > now_ms:
+            apply_block_fields(
+                comment,
+                t0=t0_readable,
+                p0=None,
+                p1=None,
+                label=None,
+                comment_error="future_price_unavailable",
+            )
+            continue
 
         if t0_ms not in price_cache:
             price_cache[t0_ms] = fetch_price_at(symbol, market_type, t0_ms, price_interval)
@@ -546,17 +651,29 @@ def annotate_comment_blocks(
         p0, err0 = price_cache[t0_ms]
         p1, err1 = price_cache[t1_ms]
 
-        comment["t0"] = datetime.fromtimestamp(t0_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
-        comment["t_window"] = f"{t_window_hours}h"
-        comment["p0"] = p0
-        comment["p1"] = p1
-
         if p0 is None or p1 is None:
-            comment["label"] = None
-            comment["comment_error"] = err0 or err1 or "price_unavailable"
+            raw_error = err0 or err1 or "price_unavailable"
+            short_error, debug_error = normalize_label_error(raw_error)
+            apply_block_fields(
+                comment,
+                t0=t0_readable,
+                p0=p0,
+                p1=p1,
+                label=None,
+                comment_error=short_error or "missing_label_reason",
+                debug_error=debug_error,
+            )
         else:
-            comment["label"] = 1 if p1 > p0 else -1
-            comment["comment_error"] = "fallback_post_time" if not [v for v in [timestamp_map.get(cid, 0) for cid in ids] if v > 0] else ""
+            used_fallback = not [v for v in [timestamp_map.get(cid, 0) for cid in ids] if v > 0]
+            apply_block_fields(
+                comment,
+                t0=t0_readable,
+                p0=p0,
+                p1=p1,
+                label=1 if p1 > p0 else -1,
+                comment_error="",
+                label_warning="fallback_post_time" if used_fallback else "",
+            )
 
     return ""
 

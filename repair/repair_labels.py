@@ -42,6 +42,7 @@ from parsers.parse_article import (
     fetch_price_at,
     find_post_data_in_app_data,
     load_sidecar_comments,
+    normalize_label_error,
     normalize_product_symbol,
     to_base_symbol,
 )
@@ -305,6 +306,46 @@ def categorize_post(post: Dict[str, Any]) -> str:
         return "missing_comment_timestamp"
     if has_fallback:
         return "fallback_post_time"
+    return "normal"
+
+
+def categorize_post(post: Dict[str, Any]) -> str:
+    """返回帖子分类。后定义版本用于覆盖历史分类逻辑。"""
+    if post.get("label_error") == "missing_symbol":
+        return "missing_symbol"
+
+    has_price_err = False
+    has_ts_err = False
+    has_future_price = False
+    has_structure_err = False
+
+    for c in iter_comments(post.get("comments", [])):
+        err = c.get("comment_error", "")
+        if c.get("label") is None and not err:
+            has_structure_err = True
+            continue
+        if not err:
+            continue
+        if err == "future_price_unavailable":
+            has_future_price = True
+        elif (
+            err.startswith("price_api_error:")
+            or err == "price_api_error"
+            or err == "no_kline_data"
+            or err.startswith("invalid_")
+        ):
+            has_price_err = True
+        elif err in {"missing_comment_timestamp", "missing_label_reason"}:
+            has_ts_err = True
+
+    if has_structure_err:
+        return "structure_error"
+    if has_future_price:
+        return "future_price_unavailable"
+    if has_price_err:
+        return "price_unavailable"
+    if has_ts_err:
+        return "missing_comment_timestamp"
     return "normal"
 
 
@@ -706,6 +747,10 @@ def repair_post_price(
             return
 
         t1_ms = t0_ms + int(t_window) * 3600 * 1000
+        if err == "future_price_unavailable" and t1_ms > int(datetime.now().timestamp() * 1000):
+            still_failed += 1
+            return
+
         time.sleep(delay)
 
         # 获取 p0
@@ -727,11 +772,17 @@ def repair_post_price(
             comment["p1"] = p1
             comment["label"] = 1 if p1 > p0 else -1
             comment["comment_error"] = ""
+            comment.pop("debug_error", None)
             repaired_count += 1
         else:
             comment["p0"] = p0
             comment["p1"] = p1
-            comment["comment_error"] = err0 or err1 or "price_unavailable"
+            short_error, debug_error = normalize_label_error(err0 or err1 or "price_unavailable")
+            comment["comment_error"] = short_error
+            if debug_error:
+                comment["debug_error"] = debug_error
+            else:
+                comment.pop("debug_error", None)
             still_failed += 1
 
     for c in comments:
@@ -962,7 +1013,14 @@ def main() -> None:
         cat = categorize_post(post)
         categories[cat].append(post)
 
-    cat_names = ["normal", "missing_symbol", "missing_comment_timestamp", "price_unavailable", "fallback_post_time"]
+    cat_names = [
+        "normal",
+        "missing_symbol",
+        "missing_comment_timestamp",
+        "price_unavailable",
+        "future_price_unavailable",
+        "structure_error",
+    ]
     print("\n分类结果:")
     for name in cat_names:
         posts = categories.get(name, [])
@@ -1018,6 +1076,17 @@ def main() -> None:
         )
     repaired["price_unavailable"] = repaired_price
 
+    future_posts = categories.get("future_price_unavailable", [])
+    print(f"\n  修复 future_price_unavailable ({len(future_posts)} 条)...")
+    repaired_future = []
+    for i, post in enumerate(future_posts):
+        if (i + 1) % 20 == 0:
+            print(f"    进度: {i + 1}/{len(future_posts)}")
+        repaired_future.append(
+            repair_post_price(post, args.t_window_hours, args.price_interval, args.retry_count, args.delay)
+        )
+    repaired["future_price_unavailable"] = repaired_future
+
     # missing_comment_timestamp: 重新提取时间戳
     ts_posts = categories.get("missing_comment_timestamp", [])
     print(f"\n  修复 missing_comment_timestamp ({len(ts_posts)} 条)...")
@@ -1037,6 +1106,7 @@ def main() -> None:
             repair_post_timestamp(post, args.t_window_hours, args.price_interval, args.delay)
         )
     repaired["fallback_post_time"] = repaired_fallback
+    repaired["structure_error"] = categories.get("structure_error", [])
 
     # 写入输出
     print("\n写入输出文件...")
