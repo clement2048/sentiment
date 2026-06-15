@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""JSONL 去重工具。
-
+"""
+JSONL 去重工具。
 默认按 post_id 去重，保留有效评论数最多的记录；若分数相同，保留后出现的记录。
 适合把多个来源或分流后的 clean JSONL 合并成最终训练集。
 """
@@ -47,6 +47,7 @@ def iter_comments(comments: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]
         yield from iter_comments(comment.get("replies", []))
 
 
+## 有效评论数：要有情感label 是 1 或 -1，且没有 comment_error 的评论数量。
 def valid_comment_count(post: Dict[str, Any]) -> int:
     total = 0
     for comment in iter_comments(post.get("comments", [])):
